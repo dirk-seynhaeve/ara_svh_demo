@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bootstrap script for Ara project (Ubuntu)
+# Bootstrap script for Ara project (host)
 # - Run with --check to print what would be installed and detection results
-# - Run with --install to perform apt install (requires sudo)
+# - Run with --install to perform package install (requires sudo)
 # - Run with --yes to skip confirmation
 
 set -eu
@@ -59,7 +59,7 @@ usage() {
 Usage: $0 [--check|--install] [--yes]
 
 --check    : only check which packages are installed, test compilers and suggest flags
---install  : install the recommended packages via apt (requires sudo)
+--install  : install the recommended packages via apt/dnf/yum (requires sudo)
 --yes      : assume yes for install
 
 Examples:
@@ -73,6 +73,93 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
 RESET='\033[0m'
+
+# Detect distribution and package manager (debian-like vs RHEL-like)
+DISTRO_FAMILY="unknown"
+PKG_MANAGER=""
+if [[ -f /etc/os-release ]]; then
+  . /etc/os-release
+  id_lc=${ID_LIKE:-}
+  id=${ID:-}
+  if [[ " $id_lc " == *"debian"* || " $id_lc " == *"ubuntu"* || "$id" == "debian" || "$id" == "ubuntu" ]]; then
+    DISTRO_FAMILY=debian
+    if command -v apt >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
+      PKG_MANAGER=apt
+    fi
+  elif [[ " $id_lc " == *"rhel"* || " $id_lc " == *"fedora"* || "$id" == "centos" || "$id" == "rhel" || "$id" == "fedora" || "$id" == "rocky" || "$id" == "almalinux" ]]; then
+    DISTRO_FAMILY=rhel
+    if command -v dnf >/dev/null 2>&1; then
+      PKG_MANAGER=dnf
+    elif command -v yum >/dev/null 2>&1; then
+      PKG_MANAGER=yum
+    fi
+  fi
+fi
+
+# Mapping of Debian package names to common RHEL equivalents (space-separated alternatives)
+declare -A RHEL_MAP
+RHEL_MAP[build-essential]="Development Tools"
+RHEL_MAP[cmake]="cmake"
+RHEL_MAP[ninja-build]="ninja ninja-build"
+RHEL_MAP[autoconf]="autoconf"
+RHEL_MAP[automake]="automake"
+RHEL_MAP[libtool]="libtool"
+RHEL_MAP[pkg-config]="pkgconfig pkgconf"
+RHEL_MAP[texinfo]="texinfo"
+RHEL_MAP[help2man]="help2man"
+RHEL_MAP[flex]="flex"
+RHEL_MAP[bison]="bison"
+RHEL_MAP[clang]="clang"
+RHEL_MAP[gcc]="gcc"
+RHEL_MAP[g++]="gcc-c++"
+RHEL_MAP[libc++-dev]="libcxx-devel libcxx"
+RHEL_MAP[libc++abi-dev]="libcxxabi-devel libcxxabi"
+RHEL_MAP[python3]="python3"
+RHEL_MAP[python3-pip]="python3-pip python3-pip-wheel"
+RHEL_MAP[git]="git"
+RHEL_MAP[ccache]="ccache"
+RHEL_MAP[libelf-dev]="elfutils-libelf-devel libelf-devel"
+RHEL_MAP[zlib1g]="zlib"
+RHEL_MAP[zlib1g-dev]="zlib-devel"
+RHEL_MAP[libfl-dev]="flex"
+RHEL_MAP[linux-headers]="kernel-devel kernel-headers"
+
+# Helper: translate a Debian package name to RHEL alternatives
+translate_rhel() {
+  local pkg="$1"
+  # kernel headers (dynamic name) -> kernel-devel
+  if [[ "$pkg" == linux-headers-* ]]; then
+    echo "kernel-devel"
+    return
+  fi
+  if [[ -n "${RHEL_MAP[$pkg]:-}" ]]; then
+    echo "${RHEL_MAP[$pkg]}"
+  else
+    # fallback: try the same name
+    echo "$pkg"
+  fi
+}
+
+# If we couldn't determine a package manager from /etc/os-release, probe common managers
+if [[ -z "$PKG_MANAGER" ]]; then
+  if command -v apt >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
+    PKG_MANAGER=apt
+    DISTRO_FAMILY=debian
+  elif command -v dnf >/dev/null 2>&1; then
+    PKG_MANAGER=dnf
+    DISTRO_FAMILY=rhel
+  elif command -v yum >/dev/null 2>&1; then
+    PKG_MANAGER=yum
+    DISTRO_FAMILY=rhel
+  fi
+fi
+
+if [[ -z "$PKG_MANAGER" ]]; then
+  echo "Error: Unable to determine package manager (apt/dnf/yum)."
+  echo "This bootstrap helper supports Debian-like and RHEL-like distributions only."
+  echo "Please install the required packages manually or run this script on a supported distro."
+  exit 1
+fi
 
 MODE=check
 ASSUME_YES=0
@@ -91,15 +178,53 @@ echo "Ara bootstrap helper"
 if [[ "$MODE" == "install" ]]; then
   echo "Packages to install: ${PKGS[*]}"
   if [[ $ASSUME_YES -eq 0 ]]; then
-    read -r -p "Proceed to apt install these packages? [y/N] " reply || true
+    read -r -p "Proceed to install these packages? [y/N] " reply || true
     if [[ "${reply,,}" != "y" ]]; then
       echo "Aborting install."; exit 1
     fi
   fi
-  sudo apt update
-  sudo apt install -y "${PKGS[@]}"
-  echo "Packages installed (if successful). You may still need to pass clang flags when building Verilator."
-  exit 0
+  if [[ "$DISTRO_FAMILY" == "rhel" && -n "$PKG_MANAGER" ]]; then
+    echo "Detected RHEL-like distro, using $PKG_MANAGER to install packages."
+    # Try to install Development Tools group (covers build-essential equivalent)
+    if [[ "$PKG_MANAGER" == "dnf" || "$PKG_MANAGER" == "yum" ]]; then
+      echo "Installing Development Tools group (may require sudo)..."
+      sudo $PKG_MANAGER groupinstall -y "Development Tools" || true
+    fi
+    # Translate package names and install
+    RHEL_INSTALL=()
+    for p in "${PKGS[@]}"; do
+      # skip build-essential because covered by groupinstall
+      if [[ "$p" == "build-essential" ]]; then
+        continue
+      fi
+      # map linux-headers-* to kernel-devel
+      mapped=$(translate_rhel "$p")
+      for m in $mapped; do
+        RHEL_INSTALL+=("$m")
+      done
+    done
+    # deduplicate
+    unique=()
+    declare -A seen
+    for pkg in "${RHEL_INSTALL[@]}"; do
+      if [[ -z "${seen[$pkg]:-}" ]]; then
+        seen[$pkg]=1
+        unique+=("$pkg")
+      fi
+    done
+    if [[ ${#unique[@]} -gt 0 ]]; then
+      echo "Installing: ${unique[*]}"
+      sudo $PKG_MANAGER install -y "${unique[@]}"
+    fi
+    echo "Install finished (if successful). You may still need to pass clang flags when building Verilator."
+    exit 0
+  else
+    # Default to Debian/apt path
+    sudo apt update
+    sudo apt install -y "${PKGS[@]}"
+    echo "Packages installed (if successful). You may still need to pass clang flags when building Verilator."
+    exit 0
+  fi
 fi
 
 # --- CHECK MODE ---
@@ -115,11 +240,29 @@ for p in "${PKGS[@]}"; do
   fi
 done
 for p in "${PKGS[@]}"; do
-  if dpkg -s "$p" >/dev/null 2>&1; then
-    printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$p" "installed"
+  if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+    # translate and test any of the possible RHEL package names
+    alternatives=$(translate_rhel "$p")
+    found=1
+    for alt in $alternatives; do
+      if rpm -q "$alt" >/dev/null 2>&1; then
+        found=0
+        break
+      fi
+    done
+    if [[ $found -eq 0 ]]; then
+      printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$p" "installed"
+    else
+      printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$p" "MISSING"
+      MISSING+=("$p")
+    fi
   else
-    printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$p" "MISSING"
-    MISSING+=("$p")
+    if dpkg -s "$p" >/dev/null 2>&1; then
+      printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$p" "installed"
+    else
+      printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$p" "MISSING"
+      MISSING+=("$p")
+    fi
   fi
 done
 

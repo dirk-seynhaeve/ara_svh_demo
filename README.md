@@ -55,17 +55,17 @@ Notes:
 - `ninja-build` and `cmake` are required to build the LLVM toolchain (riscv-llvm).
 - `flex` and `bison` are required by some utilities (e.g., `dtc`).
 
-Bootstrap helper:
+# Bootstrap helper:
 
 We provide a bootstrap helper script that checks for these packages and can install them for you.
 Run it from the project root:
 
 ```bash
 # Check system for missing packages and compiler/link behavior
-./scripts/bootstrap-ubuntu.sh --check
+./scripts/bootstrap-host.sh --check
 
 # Install recommended packages (requires sudo)
-sudo ./scripts/bootstrap-ubuntu.sh --install --yes
+sudo ./scripts/bootstrap-host.sh --install --yes
 ```
 
 The script also tests whether `clang++` links C++ programs by default or whether you need to
