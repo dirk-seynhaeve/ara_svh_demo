@@ -5,7 +5,6 @@
 # - Run with --yes to skip confirmation
 
 set -eu
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Generic package keys. We'll map these to distro-specific package names below.
 KEYS=(
   build-essential
@@ -39,39 +38,112 @@ KEYS=(
 declare -A PKG_DEBIAN
 declare -A PKG_RHEL
 
+# Note: Debian/Ubuntu rarely require multiple hard-coded alternatives per
+# logical package key. Package names on Debian family systems are generally
+# stable across releases and derivatives, and APT/DPKG handle virtual
+# packages/provides more consistently than RHEL tooling. We therefore keep
+# a single canonical Debian package name per key (the `PKG_DEBIAN` map)
+# and rely on `BIN_FOR_KEY` (representative binaries) for detection. If an
+# edge-case appears, we can add an apt-time fallback that queries packages
+# providing a file/binary instead of maintaining many hard-coded aliases.
+
 # Debian/Ubuntu names (mostly identical to keys)
 for k in "${KEYS[@]}"; do
   PKG_DEBIAN["$k"]="$k"
 done
 # linux-headers includes the running kernel version on Debian
+# Fix this element in the PKG_DEBIANarray
 PKG_DEBIAN[linux-headers]="linux-headers-$(uname -r)"
 
-# RHEL equivalents (may be group names or multiple alternatives)
-PKG_RHEL[build-essential]="Development Tools"
-PKG_RHEL[cmake]="cmake"
-PKG_RHEL[ninja-build]="ninja ninja-build"
-PKG_RHEL[autoconf]="autoconf"
-PKG_RHEL[automake]="automake"
-PKG_RHEL[libtool]="libtool"
-PKG_RHEL[pkg-config]="pkgconfig pkgconf"
-PKG_RHEL[texinfo]="texinfo"
-PKG_RHEL[help2man]="help2man"
-PKG_RHEL[flex]="flex"
-PKG_RHEL[bison]="bison"
-PKG_RHEL[clang]="clang"
-PKG_RHEL[gcc]="gcc"
-PKG_RHEL[g++]="gcc-c++"
-PKG_RHEL[libc++-dev]="libcxx-devel libcxx"
-PKG_RHEL[libc++abi-dev]="libcxxabi-devel libcxxabi"
-PKG_RHEL[python3]="python3"
-PKG_RHEL[python3-pip]="python3-pip python3-pip-wheel"
-PKG_RHEL[git]="git"
-PKG_RHEL[ccache]="ccache"
-PKG_RHEL[libelf-dev]="elfutils-libelf-devel libelf-devel"
-PKG_RHEL[zlib1g]="zlib"
-PKG_RHEL[zlib1g-dev]="zlib-devel"
-PKG_RHEL[libfl-dev]="flex"
-PKG_RHEL[linux-headers]="kernel-devel kernel-headers"
+# RHEL equivalents (may be group names or multiple alternatives).
+# Use space-separated strings for alternatives; split into arrays when needed.
+declare -A PKG_RHEL
+PKG_RHEL[build-essential]='Development Tools'
+PKG_RHEL[cmake]='cmake'
+PKG_RHEL[ninja-build]='ninja ninja-build'
+PKG_RHEL[autoconf]='autoconf'
+PKG_RHEL[automake]='automake'
+PKG_RHEL[libtool]='libtool'
+PKG_RHEL[pkg-config]='pkgconfig pkgconf'
+PKG_RHEL[texinfo]='texinfo'
+PKG_RHEL[help2man]='help2man'
+PKG_RHEL[flex]='flex'
+PKG_RHEL[bison]='bison'
+PKG_RHEL[clang]='clang'
+PKG_RHEL[gcc]='gcc'
+PKG_RHEL[g++]='gcc-c++'
+PKG_RHEL[libc++-dev]='libcxx-devel libcxx'
+PKG_RHEL[libc++abi-dev]='libcxxabi-devel libcxxabi'
+PKG_RHEL[python3]='python3'
+PKG_RHEL[python3-pip]='python3-pip python3-pip-wheel'
+PKG_RHEL[git]='git'
+PKG_RHEL[ccache]='ccache'
+PKG_RHEL[libelf-dev]='elfutils-libelf-devel libelf-devel'
+PKG_RHEL[zlib1g]='zlib'
+PKG_RHEL[zlib1g-dev]='zlib-devel'
+PKG_RHEL[libfl-dev]='flex'
+PKG_RHEL[linux-headers]='kernel-devel kernel-headers'
+
+# Optional mapping from generic keys to one or more command names that
+# indicate the tool is present on PATH. If a binary is found we treat
+# the key as "installed" even if the package name differs between
+# distros (this makes detection more robust).
+declare -A BIN_FOR_KEY
+BIN_FOR_KEY[ninja-build]='ninja'
+BIN_FOR_KEY[pkg-config]='pkg-config'
+BIN_FOR_KEY[python3-pip]='pip3'
+BIN_FOR_KEY[g++]='g++'
+BIN_FOR_KEY[python3]='python3'
+BIN_FOR_KEY[ccache]='ccache'
+BIN_FOR_KEY[git]='git'
+BIN_FOR_KEY[clang]='clang'
+BIN_FOR_KEY[gcc]='gcc'
+BIN_FOR_KEY[cmake]='cmake'
+
+# Helper: check whether a RHEL key is present on this host. This first
+# checks for a matching executable (from BIN_FOR_KEY) and falls back to
+# probing RPM package names from `PKG_RHEL` alternatives. Special-case
+# the `build-essential` key which maps to the "Development Tools"
+# group on RHEL.
+rhel_key_installed() {
+  local key="$1"
+  # build-essential -> Development Tools group
+  if [[ "$key" == "build-essential" ]]; then
+    if command -v $PKG_MANAGER >/dev/null 2>&1; then
+      if $PKG_MANAGER group list --installed 2>/dev/null | grep -qi "Development Tools"; then
+        return 0
+      fi
+    fi
+    # fallback: check representative packages
+    if rpm -q gcc >/dev/null 2>&1 || rpm -q make >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+
+  # If a representative binary is configured for this key, prefer that
+  if [[ -n "${BIN_FOR_KEY[$key]:-}" ]]; then
+    read -r -a bins <<< "${BIN_FOR_KEY[$key]}"
+    for b in "${bins[@]}"; do
+      if command -v "$b" >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+  fi
+
+  # fall back to checking RPM packages listed in PKG_RHEL
+  if [[ -n ${PKG_RHEL[$key]:-} ]]; then
+    read -r -a alts <<< "${PKG_RHEL[$key]}"
+  else
+    alts=("$key")
+  fi
+  for alt in "${alts[@]}"; do
+    if rpm -q "$alt" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 usage() {
   cat <<EOF
@@ -90,7 +162,6 @@ EOF
 # ANSI color codes for terminal output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-YELLOW='\033[0;33m'
 RESET='\033[0m'
 
 # Detect distribution and package manager (debian-like vs RHEL-like)
@@ -100,12 +171,18 @@ if [[ -f /etc/os-release ]]; then
   . /etc/os-release
   id_lc=${ID_LIKE:-}
   id=${ID:-}
-  if [[ " $id_lc " == *"debian"* || " $id_lc " == *"ubuntu"* || "$id" == "debian" || "$id" == "ubuntu" ]]; then
+  # Read /etc/os-release and determine distro family. We inspect
+  # `ID_LIKE` (may contain multiple space-separated tokens) and `ID`.
+  # Match family keywords in `ID_LIKE` and perform an exact match on
+  # `ID` to avoid accidental partial matches.
+  if [[ "$id_lc" =~ (debian|ubuntu) || "$id" =~ ^(debian|ubuntu)$ ]]; then
     DISTRO_FAMILY=debian
     if command -v apt >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
       PKG_MANAGER=apt
     fi
-  elif [[ " $id_lc " == *"rhel"* || " $id_lc " == *"fedora"* || "$id" == "centos" || "$id" == "rhel" || "$id" == "fedora" || "$id" == "rocky" || "$id" == "almalinux" ]]; then
+  elif [[ "$id_lc" =~ (rhel|fedora) || "$id" =~ ^(centos|rhel|fedora|rocky|almalinux)$ ]]; then
+    # RHEL-family (RHEL, CentOS, Fedora, Rocky, AlmaLinux).
+    # Prefer `dnf` when available, fall back to `yum`.
     DISTRO_FAMILY=rhel
     if command -v dnf >/dev/null 2>&1; then
       PKG_MANAGER=dnf
@@ -114,50 +191,6 @@ if [[ -f /etc/os-release ]]; then
     fi
   fi
 fi
-
-# Mapping of Debian package names to common RHEL equivalents (space-separated alternatives)
-declare -A RHEL_MAP
-RHEL_MAP[build-essential]="Development Tools"
-RHEL_MAP[cmake]="cmake"
-RHEL_MAP[ninja-build]="ninja ninja-build"
-RHEL_MAP[autoconf]="autoconf"
-RHEL_MAP[automake]="automake"
-RHEL_MAP[libtool]="libtool"
-RHEL_MAP[pkg-config]="pkgconfig pkgconf"
-RHEL_MAP[texinfo]="texinfo"
-RHEL_MAP[help2man]="help2man"
-RHEL_MAP[flex]="flex"
-RHEL_MAP[bison]="bison"
-RHEL_MAP[clang]="clang"
-RHEL_MAP[gcc]="gcc"
-RHEL_MAP[g++]="gcc-c++"
-RHEL_MAP[libc++-dev]="libcxx-devel libcxx"
-RHEL_MAP[libc++abi-dev]="libcxxabi-devel libcxxabi"
-RHEL_MAP[python3]="python3"
-RHEL_MAP[python3-pip]="python3-pip python3-pip-wheel"
-RHEL_MAP[git]="git"
-RHEL_MAP[ccache]="ccache"
-RHEL_MAP[libelf-dev]="elfutils-libelf-devel libelf-devel"
-RHEL_MAP[zlib1g]="zlib"
-RHEL_MAP[zlib1g-dev]="zlib-devel"
-RHEL_MAP[libfl-dev]="flex"
-RHEL_MAP[linux-headers]="kernel-devel kernel-headers"
-
-# Helper: translate a Debian package name to RHEL alternatives
-translate_rhel() {
-  local pkg="$1"
-  # kernel headers (dynamic name) -> kernel-devel
-  if [[ "$pkg" == linux-headers-* ]]; then
-    echo "kernel-devel"
-    return
-  fi
-  if [[ -n "${RHEL_MAP[$pkg]:-}" ]]; then
-    echo "${RHEL_MAP[$pkg]}"
-  else
-    # fallback: try the same name
-    echo "$pkg"
-  fi
-}
 
 # If we couldn't determine a package manager from /etc/os-release, probe common managers
 if [[ -z "$PKG_MANAGER" ]]; then
@@ -174,17 +207,21 @@ if [[ -z "$PKG_MANAGER" ]]; then
 fi
 
 if [[ -z "$PKG_MANAGER" ]]; then
-  echo "Error: Unable to determine package manager (apt/dnf/yum)."
-  echo "This bootstrap helper supports Debian-like and RHEL-like distributions only."
-  echo "Please install the required packages manually or run this script on a supported distro."
+  cat <<'MSG'
+Error: Unable to determine package manager (apt/dnf/yum).
+This bootstrap helper supports Debian-like and RHEL-like distributions only.
+Please install the required packages manually or run this script on a supported distro.
+MSG
   exit 1
 fi
 
 # Confirm detected distro family and package manager
 echo "Detected distro family: $DISTRO_FAMILY (package manager: $PKG_MANAGER)"
 if [[ "$DISTRO_FAMILY" != "debian" && "$DISTRO_FAMILY" != "rhel" ]]; then
-  echo "Error: unsupported distro family '$DISTRO_FAMILY'."
-  echo "This bootstrap helper only supports Debian-like and RHEL-like distributions."
+  cat <<MSG
+Error: unsupported distro family '$DISTRO_FAMILY'.
+This bootstrap helper only supports Debian-like and RHEL-like distributions.
+MSG
   exit 1
 fi
 
@@ -192,10 +229,28 @@ fi
 DISPLAY_PKGS=()
 for key in "${KEYS[@]}"; do
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
-    # choose the first token of the RHEL mapping for display purposes
-    val="${PKG_RHEL[$key]:-$key}"
-    first=${val%% *}
-    DISPLAY_PKGS+=("$first")
+    # Choose a display name for RHEL: split the space-separated
+    # alternatives from `PKG_RHEL` into an array and use the first
+    # alternative by default. If the Debian package name (from
+    # `PKG_DEBIAN`) appears among the alternatives, prefer that for
+    # display (so `ninja-build` is shown instead of `ninja`). This
+    # preserves multi-word names (e.g. "Development Tools") and
+    # dashes in package names.
+    if [[ -n ${PKG_RHEL[$key]:-} ]]; then
+      read -r -a alts <<< "${PKG_RHEL[$key]}"
+      display_alt="${alts[0]}"
+      # Prefer the Debian package name when available in alternatives
+      deb_name="${PKG_DEBIAN[$key]:-$key}"
+      for a in "${alts[@]}"; do
+        if [[ "$a" == "$deb_name" ]]; then
+          display_alt="$a"
+          break
+        fi
+      done
+      DISPLAY_PKGS+=("$display_alt")
+    else
+      DISPLAY_PKGS+=("$key")
+    fi
   else
     DISPLAY_PKGS+=("${PKG_DEBIAN[$key]:-$key}")
   fi
@@ -214,29 +269,27 @@ compute_missing() {
     for idx in "${!KEYS[@]}"; do
       key=${KEYS[$idx]}
       disp=${DISPLAY_PKGS[$idx]}
-      alternatives="${PKG_RHEL[$key]:-$key}"
-      if [[ "$key" == "linux-headers" ]]; then
-        alternatives="kernel-devel"
+      # Use centralized detection helper for RHEL keys
+      NEED_DEV_GROUP=0
+      if rhel_key_installed "$key"; then
+        found=0
+      else
+        found=1
       fi
-      # Treat build-essential as a groupinstall (Development Tools)
-      if [[ "$key" == "build-essential" ]]; then
-        alternatives="Development Tools"
-      fi
-      found=1
-      for alt in $alternatives; do
-        if rpm -q "$alt" >/dev/null 2>&1; then
-          found=0
-          break
-        fi
-      done
       if [[ $found -ne 0 ]]; then
         MISSING+=("$disp")
         MISSING_KEYS+=("$key")
-        # If this is the build-essential key, mark the groupinstall flag
         if [[ "$key" == "build-essential" ]]; then
           NEED_DEV_GROUP=1
         else
-          for m in $alternatives; do
+          # Populate the alternatives array from PKG_RHEL (space-separated)
+          # If there is no explicit RHEL mapping, fall back to the generic key.
+          if [[ -n ${PKG_RHEL[$key]:-} ]]; then
+            read -r -a alternatives <<< "${PKG_RHEL[$key]}"
+          else
+            alternatives=("$key")
+          fi
+          for m in "${alternatives[@]}"; do
             RHEL_INSTALL+=("$m")
           done
         fi
@@ -305,12 +358,12 @@ if [[ "$MODE" == "install" ]]; then
       if [[ "$key" == "build-essential" ]]; then
         continue
       fi
-      mapped="${PKG_RHEL[$key]:-${key}}"
-      # expand linux-headers mapping if needed
-      if [[ "$key" == "linux-headers" ]]; then
-        mapped="kernel-devel"
+      if [[ -n ${PKG_RHEL[$key]:-} ]]; then
+        read -r -a mapped <<< "${PKG_RHEL[$key]}"
+      else
+        mapped=("$key")
       fi
-      for m in $mapped; do
+      for m in "${mapped[@]}"; do
         RHEL_INSTALL+=("$m")
       done
     done
@@ -358,20 +411,11 @@ for idx in "${!KEYS[@]}"; do
   key=${KEYS[$idx]}
   disp=${DISPLAY_PKGS[$idx]}
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
-    # get alternatives from PKG_RHEL mapping
-    alternatives="${PKG_RHEL[$key]:-$key}"
-    # special-case linux-headers
-    if [[ "$key" == "linux-headers" ]]; then
-      alternatives="kernel-devel"
-    fi
-    found=1
-    for alt in $alternatives; do
-      if rpm -q "$alt" >/dev/null 2>&1; then
-        found=0
-        break
-      fi
-    done
-    if [[ $found -eq 0 ]]; then
+    # Detect package presence using the centralized helper
+    # `rhel_key_installed` (it prefers representative binaries and
+    # falls back to RPM package names listed in `PKG_RHEL`). This
+    # avoids manual alternatives expansion here.
+    if rhel_key_installed "$key"; then
       printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$disp" "installed"
     else
       printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$disp" "MISSING"
@@ -388,9 +432,11 @@ for idx in "${!KEYS[@]}"; do
 done
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
-  echo
-  echo "Missing packages detected: ${MISSING[*]}"
-  echo "Run: sudo $0 --install --yes"
+  cat <<MSG
+
+Missing packages detected: ${MISSING[*]}
+Run: sudo $0 --install --yes
+MSG
 fi
 
 # Compiler detection
@@ -478,7 +524,9 @@ fi
 # Cleanup
 rm -rf "$TMPDIR"
 
-echo
-echo "Bootstrap check completed. If you want to install missing packages, run: sudo $0 --install --yes"
+cat <<MSG
+
+Bootstrap check completed. If you want to install missing packages, run: sudo $0 --install --yes
+MSG
 
 exit 0
