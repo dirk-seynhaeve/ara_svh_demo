@@ -46,8 +46,8 @@ ifneq (${CLANG_PATH},)
 	CLANG_CXXFLAGS := "-nostdinc++ -isystem $(CLANG_PATH)/include/c++/v1"
 	CLANG_LDFLAGS  := "-L $(CLANG_PATH)/lib -Wl,-rpath,$(CLANG_PATH)/lib -lc++ -nostdlib++"
 else
-	CLANG_CXXFLAGS := ""
-	CLANG_LDFLAGS  := ""
+	CLANG_CXXFLAGS := -stdlib=libc++
+	CLANG_LDFLAGS  := -stdlib=libc++
 endif
 
 # Submodule update - Big modules are not automatically updated by default
