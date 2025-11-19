@@ -6,53 +6,72 @@
 
 set -eu
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PKGS=(
-  # Essential build tools: compilers, make, linker
+# Generic package keys. We'll map these to distro-specific package names below.
+KEYS=(
   build-essential
-  # Build-system generators and ninja backend for LLVM/Verilator
   cmake
   ninja-build
-  # Autotools for projects using autoconf/automake
   autoconf
   automake
   libtool
   pkg-config
-
-  # Documentation/build helpers
-  texinfo    # for make install/docs
-  help2man   # generates manpages
-
-  # Parser/lexer generators used by some tools
-  flex       # lexical analyser generator
-  bison      # parser generator
-
-  # Compilers
-  clang      # optional: used for LLVM/Verilator builds
-  gcc        # host C compiler
-  g++        # host C++ compiler
-
-  # If building with clang, libc++ headers/libs are useful
+  texinfo
+  help2man
+  flex
+  bison
+  clang
+  gcc
+  g++
   libc++-dev
   libc++abi-dev
-
-  # Python and git for helper scripts and submodule tooling
   python3
   python3-pip
   git
-
-  # Optional helpers to speed up repeated builds
   ccache
-
-  # Verilator and toolchain prerequisites
-  libelf-dev   # ELF manipulation (used when reading/writing ELF files)
-  zlib1g       # runtime zlib (commonly present)
-  zlib1g-dev   # zlib headers/libs for optional compression support
-  libfl-dev    # libfl (flex) development files
+  libelf-dev
+  zlib1g
+  zlib1g-dev
+  libfl-dev
+  linux-headers
 )
 
-# Add kernel headers package (dynamic name e.g. linux-headers-5.15.0-58-generic)
-KHEADERS="linux-headers-$(uname -r)"
-PKGS+=("$KHEADERS")
+# Distro-specific name maps (generic key -> distro package name)
+declare -A PKG_DEBIAN
+declare -A PKG_RHEL
+
+# Debian/Ubuntu names (mostly identical to keys)
+for k in "${KEYS[@]}"; do
+  PKG_DEBIAN["$k"]="$k"
+done
+# linux-headers includes the running kernel version on Debian
+PKG_DEBIAN[linux-headers]="linux-headers-$(uname -r)"
+
+# RHEL equivalents (may be group names or multiple alternatives)
+PKG_RHEL[build-essential]="Development Tools"
+PKG_RHEL[cmake]="cmake"
+PKG_RHEL[ninja-build]="ninja ninja-build"
+PKG_RHEL[autoconf]="autoconf"
+PKG_RHEL[automake]="automake"
+PKG_RHEL[libtool]="libtool"
+PKG_RHEL[pkg-config]="pkgconfig pkgconf"
+PKG_RHEL[texinfo]="texinfo"
+PKG_RHEL[help2man]="help2man"
+PKG_RHEL[flex]="flex"
+PKG_RHEL[bison]="bison"
+PKG_RHEL[clang]="clang"
+PKG_RHEL[gcc]="gcc"
+PKG_RHEL[g++]="gcc-c++"
+PKG_RHEL[libc++-dev]="libcxx-devel libcxx"
+PKG_RHEL[libc++abi-dev]="libcxxabi-devel libcxxabi"
+PKG_RHEL[python3]="python3"
+PKG_RHEL[python3-pip]="python3-pip python3-pip-wheel"
+PKG_RHEL[git]="git"
+PKG_RHEL[ccache]="ccache"
+PKG_RHEL[libelf-dev]="elfutils-libelf-devel libelf-devel"
+PKG_RHEL[zlib1g]="zlib"
+PKG_RHEL[zlib1g-dev]="zlib-devel"
+PKG_RHEL[libfl-dev]="flex"
+PKG_RHEL[linux-headers]="kernel-devel kernel-headers"
 
 usage() {
   cat <<EOF
@@ -161,6 +180,91 @@ if [[ -z "$PKG_MANAGER" ]]; then
   exit 1
 fi
 
+# Confirm detected distro family and package manager
+echo "Detected distro family: $DISTRO_FAMILY (package manager: $PKG_MANAGER)"
+if [[ "$DISTRO_FAMILY" != "debian" && "$DISTRO_FAMILY" != "rhel" ]]; then
+  echo "Error: unsupported distro family '$DISTRO_FAMILY'."
+  echo "This bootstrap helper only supports Debian-like and RHEL-like distributions."
+  exit 1
+fi
+
+# Build the list of distro-specific package names we'll check/install
+DISPLAY_PKGS=()
+for key in "${KEYS[@]}"; do
+  if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+    # choose the first token of the RHEL mapping for display purposes
+    val="${PKG_RHEL[$key]:-$key}"
+    first=${val%% *}
+    DISPLAY_PKGS+=("$first")
+  else
+    DISPLAY_PKGS+=("${PKG_DEBIAN[$key]:-$key}")
+  fi
+done
+
+# Helper: compute which packages are missing on this host.
+# Populates arrays: MISSING (display names), MISSING_KEYS (generic keys),
+# and PKGS_TO_INSTALL (distro-specific package names appropriate for installer).
+compute_missing() {
+  MISSING=()
+  MISSING_KEYS=()
+  PKGS_TO_INSTALL=()
+  if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+    local RHEL_INSTALL=()
+    NEED_DEV_GROUP=0
+    for idx in "${!KEYS[@]}"; do
+      key=${KEYS[$idx]}
+      disp=${DISPLAY_PKGS[$idx]}
+      alternatives="${PKG_RHEL[$key]:-$key}"
+      if [[ "$key" == "linux-headers" ]]; then
+        alternatives="kernel-devel"
+      fi
+      # Treat build-essential as a groupinstall (Development Tools)
+      if [[ "$key" == "build-essential" ]]; then
+        alternatives="Development Tools"
+      fi
+      found=1
+      for alt in $alternatives; do
+        if rpm -q "$alt" >/dev/null 2>&1; then
+          found=0
+          break
+        fi
+      done
+      if [[ $found -ne 0 ]]; then
+        MISSING+=("$disp")
+        MISSING_KEYS+=("$key")
+        # If this is the build-essential key, mark the groupinstall flag
+        if [[ "$key" == "build-essential" ]]; then
+          NEED_DEV_GROUP=1
+        else
+          for m in $alternatives; do
+            RHEL_INSTALL+=("$m")
+          done
+        fi
+      fi
+    done
+    # dedupe RHEL_INSTALL into PKGS_TO_INSTALL
+    declare -A _seen_r
+    for pkg in "${RHEL_INSTALL[@]}"; do
+      if [[ -z "${_seen_r[$pkg]:-}" ]]; then
+        _seen_r[$pkg]=1
+        PKGS_TO_INSTALL+=("$pkg")
+      fi
+    done
+  else
+    for idx in "${!KEYS[@]}"; do
+      key=${KEYS[$idx]}
+      disp=${DISPLAY_PKGS[$idx]}
+      if dpkg -s "$disp" >/dev/null 2>&1; then
+        continue
+      else
+        MISSING+=("$disp")
+        MISSING_KEYS+=("$key")
+        PKGS_TO_INSTALL+=("${PKG_DEBIAN[$key]:-$key}")
+      fi
+    done
+  fi
+}
+
 MODE=check
 ASSUME_YES=0
 while [[ $# -gt 0 ]]; do
@@ -176,7 +280,9 @@ done
 echo "Ara bootstrap helper"
 
 if [[ "$MODE" == "install" ]]; then
-  echo "Packages to install: ${PKGS[*]}"
+  # compute which packages are actually missing and should be installed
+  compute_missing
+  echo "Packages to install: ${PKGS_TO_INSTALL[*]}"
   if [[ $ASSUME_YES -eq 0 ]]; then
     read -r -p "Proceed to install these packages? [y/N] " reply || true
     if [[ "${reply,,}" != "y" ]]; then
@@ -187,18 +293,23 @@ if [[ "$MODE" == "install" ]]; then
     echo "Detected RHEL-like distro, using $PKG_MANAGER to install packages."
     # Try to install Development Tools group (covers build-essential equivalent)
     if [[ "$PKG_MANAGER" == "dnf" || "$PKG_MANAGER" == "yum" ]]; then
-      echo "Installing Development Tools group (may require sudo)..."
-      sudo $PKG_MANAGER groupinstall -y "Development Tools" || true
+      if [[ ${NEED_DEV_GROUP:-0} -eq 1 ]]; then
+        echo "Installing Development Tools group (may require sudo)..."
+        sudo $PKG_MANAGER groupinstall -y "Development Tools" || true
+      fi
     fi
     # Translate package names and install
     RHEL_INSTALL=()
-    for p in "${PKGS[@]}"; do
+    for key in "${KEYS[@]}"; do
       # skip build-essential because covered by groupinstall
-      if [[ "$p" == "build-essential" ]]; then
+      if [[ "$key" == "build-essential" ]]; then
         continue
       fi
-      # map linux-headers-* to kernel-devel
-      mapped=$(translate_rhel "$p")
+      mapped="${PKG_RHEL[$key]:-${key}}"
+      # expand linux-headers mapping if needed
+      if [[ "$key" == "linux-headers" ]]; then
+        mapped="kernel-devel"
+      fi
       for m in $mapped; do
         RHEL_INSTALL+=("$m")
       done
@@ -212,16 +323,20 @@ if [[ "$MODE" == "install" ]]; then
         unique+=("$pkg")
       fi
     done
-    if [[ ${#unique[@]} -gt 0 ]]; then
-      echo "Installing: ${unique[*]}"
-      sudo $PKG_MANAGER install -y "${unique[@]}"
+    if [[ ${#PKGS_TO_INSTALL[@]} -gt 0 ]]; then
+      echo "Installing: ${PKGS_TO_INSTALL[*]}"
+      sudo $PKG_MANAGER install -y "${PKGS_TO_INSTALL[@]}"
     fi
     echo "Install finished (if successful). You may still need to pass clang flags when building Verilator."
     exit 0
   else
     # Default to Debian/apt path
-    sudo apt update
-    sudo apt install -y "${PKGS[@]}"
+    if [[ ${#PKGS_TO_INSTALL[@]} -gt 0 ]]; then
+      sudo apt update
+      sudo apt install -y "${PKGS_TO_INSTALL[@]}"
+    else
+      echo "No packages to install."
+    fi
     echo "Packages installed (if successful). You may still need to pass clang flags when building Verilator."
     exit 0
   fi
@@ -233,16 +348,22 @@ echo "Checking installed packages..."
 MISSING=()
 # Compute the maximum package name length so the status column aligns
 maxlen=0
-for p in "${PKGS[@]}"; do
+for p in "${DISPLAY_PKGS[@]}"; do
   plen=${#p}
   if (( plen > maxlen )); then
     maxlen=$plen
   fi
 done
-for p in "${PKGS[@]}"; do
+for idx in "${!KEYS[@]}"; do
+  key=${KEYS[$idx]}
+  disp=${DISPLAY_PKGS[$idx]}
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
-    # translate and test any of the possible RHEL package names
-    alternatives=$(translate_rhel "$p")
+    # get alternatives from PKG_RHEL mapping
+    alternatives="${PKG_RHEL[$key]:-$key}"
+    # special-case linux-headers
+    if [[ "$key" == "linux-headers" ]]; then
+      alternatives="kernel-devel"
+    fi
     found=1
     for alt in $alternatives; do
       if rpm -q "$alt" >/dev/null 2>&1; then
@@ -251,17 +372,17 @@ for p in "${PKGS[@]}"; do
       fi
     done
     if [[ $found -eq 0 ]]; then
-      printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$p" "installed"
+      printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$disp" "installed"
     else
-      printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$p" "MISSING"
-      MISSING+=("$p")
+      printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$disp" "MISSING"
+      MISSING+=("$disp")
     fi
   else
-    if dpkg -s "$p" >/dev/null 2>&1; then
-      printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$p" "installed"
+    if dpkg -s "$disp" >/dev/null 2>&1; then
+      printf "  %-${maxlen}s : ${GREEN}%s${RESET}\n" "$disp" "installed"
     else
-      printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$p" "MISSING"
-      MISSING+=("$p")
+      printf "  %-${maxlen}s : ${RED}%s${RESET}\n" "$disp" "MISSING"
+      MISSING+=("$disp")
     fi
   fi
 done
