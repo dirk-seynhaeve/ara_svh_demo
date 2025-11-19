@@ -7,9 +7,74 @@ It supports the RISC-V Vector Extension, [version 1.0](https://github.com/riscv/
 
 Prototypical documentation can be found at https://pulp-platform.github.io/ara
 
+## Quick overview
+
+This repository contains the Ara vector coprocessor RTL and a set of software and verification
+artifacts to build and test Ara on a host machine using a RISC-V toolchain and the Spike ISA
+simulator.
+
+- `toolchain/*` contains submodules and scripts to build RISC-V toolchains and runtime libraries.
+- `toolchain/riscv-isa-sim` contains Spike (the RISC-V ISA simulator) used for software verification.
+- `toolchain/verilator` contains a pinned Verilator version for RTL simulation.
+
+Typical workflow:
+
+1. Initialize submodules: `make git-submodules`
+2. Build an LLVM-based RISC-V toolchain (RVV support): `make toolchain-llvm`
+3. Build Spike (patched for Ara): `make riscv-isa-sim` (see notes below if linking errors occur)
+4. Build Verilator for RTL simulation: `make verilator` (see notes below for clang/libc++ issues)
+
+This README documents the prerequisites, the step-by-step build commands used here, and
+the troubleshooting steps we applied to get the repository to build on modern Ubuntu systems.
+
+## Prerequisites (Ubuntu)
+
+The following packages are recommended on a fresh Ubuntu install to run the full build and
+simulation flow (toolchains, Spike, and Verilator). These were installed on the machine used
+to verify the steps in this README.
+
+Install command (run as root or with sudo):
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential cmake ninja-build autoconf automake libtool pkg-config \
+  texinfo help2man flex bison \
+  clang gcc g++ \
+  libc++-dev libc++abi-dev \
+  python3 python3-pip git \
+  ccache \
+  # Verilator prerequisites
+  libelf-dev zlib1g zlib1g-dev libfl-dev linux-headers-$(uname -r)
+```
+
+Notes:
+- If you plan to build Verilator or other tools with `clang`, having `libc++-dev` and `libc++abi-dev`
+  available makes it easier to force clang to use libc++ (via `-stdlib=libc++`) when the
+  default linking configuration fails.
+- `ninja-build` and `cmake` are required to build the LLVM toolchain (riscv-llvm).
+- `flex` and `bison` are required by some utilities (e.g., `dtc`).
+
+Bootstrap helper:
+
+We provide a bootstrap helper script that checks for these packages and can install them for you.
+Run it from the project root:
+
+```bash
+# Check system for missing packages and compiler/link behavior
+./scripts/bootstrap-ubuntu.sh --check
+
+# Install recommended packages (requires sudo)
+sudo ./scripts/bootstrap-ubuntu.sh --install --yes
+```
+
+The script also tests whether `clang++` links C++ programs by default or whether you need to
+pass `-stdlib=libc++` (this is useful when building Verilator with `clang`).
+
 ## Dependencies
 
 Check `DEPENDENCIES.md` for a list of hardware and software dependencies of Ara.
+
 
 ## Supported instructions
 
@@ -51,6 +116,26 @@ To build Spike, run the following command in the project's root directory.
 make riscv-isa-sim
 ```
 
+Troubleshooting notes used while setting up this repository:
+
+- Missing integer types (e.g., `uint64_t`) during compilation: modern compilers may be stricter
+  about headers and no longer depend on transitive includes. We fixed this by adding an explicit
+  `#include <cstdint>` to `fesvr/device.h`; that change is included in `patches/0003-riscv-isa-sim-patch`.
+
+- If `make riscv-isa-sim` fails with linker errors referring to `libstdc++`, try:
+
+  ```bash
+  make riscv-isa-sim LDFLAGS="-static-libstdc++"
+  ```
+
+  This forces static linkage against libstdc++ and avoids dynamic linking mismatches on hosts with
+  newer compilers. Alternatively, build Spike with older gcc/g++ binaries if available.
+
+- If `configure` or `dtc` steps fail, ensure that the Makefile's sequence is running in the intended
+  `build` directory (the Makefile clones `dtc` into `toolchain/riscv-isa-sim/build/dtc`). During
+  development there were duplicate `dtc` clones; remove or re-clone as needed so the build uses
+  `build/dtc`.
+
 ## Verilator
 
 Ara requires an updated version of Verilator, for RTL simulations.
@@ -59,8 +144,35 @@ To build it, run the following command in the project's root directory.
 
 ```bash
 # Build Verilator
-make verilator
+# If you build Verilator using `clang` you may need to ensure clang can link C++ programs.
+# On some Ubuntu installs clang links against libstdc++ by default and the configure test may fail.
+# Passing `-stdlib=libc++` to clang and clang++ resolves this on systems where libc++ is
+# available and preferred. Example (explicit):
+
+# Use clang+libc++ (example):
+CC=clang CXX=clang++ CXXFLAGS="-stdlib=libc++" LDFLAGS="-stdlib=libc++" make verilator
+
+# Or use gcc/g++ (example):
+CC=gcc CXX=g++ make verilator
 ```
+
+## Full package checklist (recommended)
+
+Below is a more complete list of packages that were validated or are commonly required
+to pass through the entire build and simulation flow. This matches the 'complete list'
+we compiled while validating the repository on Ubuntu.
+
+- Essential build tools: `build-essential`, `cmake`, `ninja-build`, `autoconf`, `automake`, `libtool`, `pkg-config`
+- Compiler toolchain: `clang`, `libc++-dev`, `libc++abi-dev`, `gcc`, `g++`
+- Parser/lexer generators: `flex`, `bison`
+- Documentation tools: `help2man`, `texinfo`
+- Python: `python3`, `python3-pip` (some helper scripts)
+- Version control: `git`
+- Optional but useful: `ccache`
+
+Install these with the `apt` command shown in the Prerequisites section earlier. Depending on your
+environment (container, CI runner, or remote demo server), you may prefer to install only a subset
+or to provide prebuilt toolchains instead of building them from source.
 
 ## Configuration
 
