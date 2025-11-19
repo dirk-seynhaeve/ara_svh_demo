@@ -105,31 +105,23 @@ toolchain-llvm-newlib: git-submodules Makefile toolchain-llvm-main
 
 toolchain-llvm-rt: git-submodules Makefile toolchain-llvm-main toolchain-llvm-newlib
 	cd $(ROOT_DIR)/toolchain/riscv-llvm/compiler-rt && rm -rf build && mkdir -p build && cd build && \
-	$(CMAKE) $(ROOT_DIR)/toolchain/riscv-llvm/compiler-rt -G Ninja \
-	-DCMAKE_INSTALL_PREFIX=$(LLVM_INSTALL_DIR) \
-	-DCMAKE_C_COMPILER_TARGET="riscv64-unknown-elf" \
-	-DCMAKE_ASM_COMPILER_TARGET="riscv64-unknown-elf" \
-	-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-	-DCOMPILER_RT_BAREMETAL_BUILD=ON \
-	-DCOMPILER_RT_BUILD_BUILTINS=ON \
-	-DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-	-DCOMPILER_RT_BUILD_MEMPROF=OFF \
-	-DCOMPILER_RT_BUILD_PROFILE=OFF \
-	-DCOMPILER_RT_BUILD_SANITIZERS=OFF \
-	-DCOMPILER_RT_BUILD_XRAY=OFF \
-	-DCMAKE_C_COMPILER_WORKS=1 \
-	-DCMAKE_CXX_COMPILER_WORKS=1 \
-	-DCMAKE_SIZEOF_VOID_P=4 \
-	-DCMAKE_C_COMPILER="$(LLVM_INSTALL_DIR)/bin/clang" \
-	-DCMAKE_C_FLAGS="-march=rv64gc -mabi=lp64d -mno-relax -mcmodel=medany" \
-	-DCMAKE_ASM_FLAGS="-march=rv64gc -mabi=lp64d -mno-relax -mcmodel=medany" \
-	-DCMAKE_AR=$(LLVM_INSTALL_DIR)/bin/llvm-ar \
-	-DCMAKE_NM=$(LLVM_INSTALL_DIR)/bin/llvm-nm \
-	-DCMAKE_RANLIB=$(LLVM_INSTALL_DIR)/bin/llvm-ranlib \
-	-DLLVM_CONFIG_PATH=$(LLVM_INSTALL_DIR)/bin/llvm-config
+	$(CMAKE) ../lib/builtins -G Ninja \
+		-DCMAKE_INSTALL_PREFIX=$(LLVM_INSTALL_DIR) \
+		-DCMAKE_C_COMPILER="$(LLVM_INSTALL_DIR)/bin/clang" \
+		-DCMAKE_C_COMPILER_TARGET="riscv64-unknown-elf" \
+		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+		-DCOMPILER_RT_BAREMETAL_BUILD=ON \
+		-DCOMPILER_RT_BUILD_BUILTINS=ON \
+		-DCMAKE_C_FLAGS="--target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -mno-relax -mcmodel=medany" \
+		-DCMAKE_ASM_FLAGS="--target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -mno-relax -mcmodel=medany" \
+		-DCMAKE_AR=$(LLVM_INSTALL_DIR)/bin/llvm-ar \
+		-DCMAKE_NM=$(LLVM_INSTALL_DIR)/bin/llvm-nm \
+		-DCMAKE_RANLIB=$(LLVM_INSTALL_DIR)/bin/llvm-ranlib \
+		-DLLVM_CONFIG_PATH=$(LLVM_INSTALL_DIR)/bin/llvm-config
 	cd $(ROOT_DIR)/toolchain/riscv-llvm/compiler-rt && \
-	$(CMAKE) --build build --target install && \
-	ln -s $(LLVM_INSTALL_DIR)/lib/linux $(LLVM_INSTALL_DIR)/lib/clang/20/lib
+		$(CMAKE) --build build --target install && \
+		ln -s $(LLVM_INSTALL_DIR)/lib/linux $(LLVM_INSTALL_DIR)/lib/clang/20/lib || true
+
 
 # Spike
 .PHONY: riscv-isa-sim riscv-isa-sim-mod
